@@ -88,6 +88,11 @@ public class HeapFile implements DbFile {
     public void writePage(Page page) throws IOException {
         // some code goes here
         // not necessary for lab1
+        DataOutputStream dataOutputStream = new DataOutputStream(new FileOutputStream(file));
+        RandomAccessFile randomAccessFile = new RandomAccessFile(file, "rw");
+        randomAccessFile.seek(page.getId().pageNumber() * BufferPool.getPageSize());
+        randomAccessFile.write(page.getPageData(), 0, BufferPool.getPageSize());
+        randomAccessFile.close();
     }
 
     /**
@@ -102,16 +107,35 @@ public class HeapFile implements DbFile {
     public ArrayList<Page> insertTuple(TransactionId tid, Tuple t)
             throws DbException, IOException, TransactionAbortedException {
         // some code goes here
-        return null;
         // not necessary for lab1
+        ArrayList<Page> dirtyPages = new ArrayList<Page>();
+        for (int i = 0; i < numPages(); i++) {
+            HeapPage heapPage = (HeapPage)Database.getBufferPool().getPage(tid, new HeapPageId(getId(), i), Permissions.READ_WRITE);
+            if (heapPage.getNumEmptySlots() > 0) {
+                heapPage.insertTuple(t);
+                heapPage.markDirty(true, tid);
+                dirtyPages.add(heapPage);
+                return dirtyPages;
+            }
+        }
+        HeapPage heapPage = new HeapPage(new HeapPageId(getId(), numPages()), HeapPage.createEmptyPageData());
+        heapPage.insertTuple(t);
+        writePage(heapPage);
+        dirtyPages.add(heapPage);
+        return dirtyPages;
     }
 
     // see DbFile.java for javadocs
     public ArrayList<Page> deleteTuple(TransactionId tid, Tuple t) throws DbException,
             TransactionAbortedException {
         // some code goes here
-        return null;
         // not necessary for lab1
+        ArrayList<Page> dirtyPages = new ArrayList<Page>();
+        HeapPage heapPage = (HeapPage)Database.getBufferPool().getPage(tid, t.getRecordId().getPageId(), Permissions.READ_WRITE);
+        heapPage.deleteTuple(t);
+        heapPage.markDirty(true, tid);
+        dirtyPages.add(heapPage);
+        return dirtyPages;
     }
 
     public class HeapFileIterator implements DbFileIterator {
