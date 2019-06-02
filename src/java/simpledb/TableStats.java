@@ -3,6 +3,7 @@ package simpledb;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Vector;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -59,6 +60,13 @@ public class TableStats {
         System.out.println("Done.");
     }
 
+    private DbFile file;
+    private int tableid, ioCostPerPage;
+    private Vector<Object> histogramTypes;
+    private int[] min;
+    private int[] max;
+    private int number;
+
     /**
      * Number of bins for the histogram. Feel free to increase this value over
      * 100, though our tests assume that you have at least 100 bins in your
@@ -85,6 +93,50 @@ public class TableStats {
         // necessarily have to (for example) do everything
         // in a single scan of the table.
         // some code goes here
+        this.tableid = tableid;
+        this.ioCostPerPage = ioCostPerPage;
+        this.number = 0;
+        this.file = Database.getCatalog().getDatabaseFile(tableid);
+        TupleDesc  tupleDesc = Database.getCatalog().getTupleDesc(tableid);
+        min = new int[tupleDesc.numFields()];
+        max = new int[tupleDesc.numFields()];
+        this.histogramTypes = new Vector<>();
+        for (int i = 0; i < tupleDesc.numFields(); i++) {
+            max[i] = -2147483647;
+            min[i] = 2147483647;
+        }
+        DbFileIterator iter = file.iterator(new TransactionId());
+        try {
+            iter.open();
+            while (iter.hasNext()) {
+                Tuple t = iter.next();
+                number++;
+                for (int i = 0; i < tupleDesc.numFields(); i++)
+                    if (t.getField(i).getType() == Type.INT_TYPE) {
+                        if (((IntField)(t.getField(i))).getValue() > max[i])
+                            max[i] = ((IntField)(t.getField(i))).getValue();
+                        if (((IntField)(t.getField(i))).getValue() < min[i])
+                            min[i] = ((IntField)(t.getField(i))).getValue();
+                    }
+            }
+            for (int i = 0; i < tupleDesc.numFields(); i++)
+                if (min[i] == 2147483647 && max[i] == -2147483647)
+                    histogramTypes.add(i, new StringHistogram(NUM_HIST_BINS));
+                else
+                    histogramTypes.add(i, new IntHistogram(NUM_HIST_BINS, min[i], max[i]));
+            iter.rewind();
+            while (iter.hasNext()) {
+                Tuple t = iter.next();
+                for (int i = 0; i < tupleDesc.numFields(); i++)
+                    if (t.getField(i).getType() == Type.INT_TYPE)
+                        ((IntHistogram) histogramTypes.get(i)).addValue(((IntField)(t.getField(i))).getValue());
+                    else
+                        ((StringHistogram) histogramTypes.get(i)).addValue(((StringField)(t.getField(i))).getValue());
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
     }
 
     /**
@@ -101,7 +153,10 @@ public class TableStats {
      */
     public double estimateScanCost() {
         // some code goes here
-        return 0;
+        if (file instanceof HeapFile)
+            return ((HeapFile)file).numPages() * ioCostPerPage;
+        else
+            return ((BTreeFile)file).numPages() * ioCostPerPage;
     }
 
     /**
@@ -115,7 +170,7 @@ public class TableStats {
      */
     public int estimateTableCardinality(double selectivityFactor) {
         // some code goes here
-        return 0;
+        return (int)(number * selectivityFactor);
     }
 
     /**
@@ -148,7 +203,10 @@ public class TableStats {
      */
     public double estimateSelectivity(int field, Predicate.Op op, Field constant) {
         // some code goes here
-        return 1.0;
+        if (Database.getCatalog().getTupleDesc(tableid).getFieldType(field) == Type.INT_TYPE)
+            return ((IntHistogram) histogramTypes.get(field)).estimateSelectivity(op, ((IntField) constant).getValue());
+        else
+            return ((StringHistogram) histogramTypes.get(field)).estimateSelectivity(op, ((StringField) constant).getValue());
     }
 
     /**
@@ -156,7 +214,7 @@ public class TableStats {
      * */
     public int totalTuples() {
         // some code goes here
-        return 0;
+        return number;
     }
 
 }
