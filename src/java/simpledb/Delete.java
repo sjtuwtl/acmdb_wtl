@@ -86,12 +86,14 @@ public class Delete extends Operator {
     @Override
     public DbIterator[] getChildren() {
         // some code goes here
-        return null;
+        DbIterator[] tmp = new DbIterator[]{child};
+        return tmp;
     }
 
     @Override
     public void setChildren(DbIterator[] children) {
         // some code goes here
+        this.child = children[0];
     }
 
 }

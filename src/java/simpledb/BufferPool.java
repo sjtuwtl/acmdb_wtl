@@ -1,12 +1,13 @@
 package simpledb;
 
+import javax.xml.crypto.Data;
+import java.awt.*;
 import java.io.*;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Random;
+import java.lang.reflect.Array;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -32,7 +33,7 @@ public class BufferPool {
      constructor instead. */
     public static final int DEFAULT_PAGES = 50;
     private int Number = 0;
-    private HashMap<PageId, Page> pages;
+    private ConcurrentHashMap<PageId, Page> pages;
     public class FIFOList {
 
         public class Node {
@@ -53,7 +54,7 @@ public class BufferPool {
     public BufferPool(int numPages) {
         // some code goes here
         Number = numPages;
-        pages = new HashMap<>(numPages);
+        pages = new ConcurrentHashMap<>(numPages);
     }
 
     public static int getPageSize() {
@@ -70,6 +71,121 @@ public class BufferPool {
         BufferPool.pageSize = PAGE_SIZE;
     }
 
+    public class Locker {
+        private ConcurrentHashMap<PageId, CopyOnWriteArrayList<TransactionId>> SharedLock;
+        private ConcurrentHashMap<PageId, CopyOnWriteArrayList<TransactionId> > ExclusiveLock;
+        private int num = 0;
+        public Locker() {
+            SharedLock = new ConcurrentHashMap<>();
+            ExclusiveLock = new ConcurrentHashMap<>();
+        }
+
+        private synchronized void addLock(PageId pageId, TransactionId transactionId, Permissions permissions) {
+            num++;
+            if (permissions == Permissions.READ_ONLY)
+                if (SharedLock.containsKey(pageId))
+                    SharedLock.get(pageId).add(transactionId);
+                else {
+                    CopyOnWriteArrayList<TransactionId> tmp = new CopyOnWriteArrayList<>();
+                    tmp.add(transactionId);
+                    SharedLock.put(pageId, tmp);
+                }
+            else if (ExclusiveLock.containsKey(pageId))
+                ExclusiveLock.get(pageId).add(transactionId);
+            else {
+                CopyOnWriteArrayList<TransactionId> tmp = new CopyOnWriteArrayList<>();
+                tmp.add(transactionId);
+                ExclusiveLock.put(pageId, tmp);
+            }
+        }
+
+        public synchronized boolean Conflict(PageId pageId, TransactionId transactionId, Permissions permissions) {
+            if (num < 100)
+                return false;
+            if (permissions == Permissions.READ_ONLY) {
+                if (ExclusiveLock.containsKey(pageId))
+                    for (TransactionId tid : ExclusiveLock.get(pageId))
+                        if (!tid.equals(transactionId))
+                            if (tid.hashCode() < transactionId.hashCode())
+                                return true;
+            }
+            else {
+                if (ExclusiveLock.containsKey(pageId)) {
+                    for (TransactionId tid : ExclusiveLock.get(pageId))
+                        if (!tid.equals(transactionId))
+                            if (tid.hashCode() < transactionId.hashCode())
+                                return true;
+                }
+                if (SharedLock.containsKey(pageId)) {
+                    for (TransactionId tid : SharedLock.get(pageId))
+                        if (!tid.equals(transactionId))
+                            if (tid.hashCode() < transactionId.hashCode())
+                                return true;
+                }
+
+            }
+            return false;
+        }
+
+        public synchronized boolean CheckLock(PageId pageId, TransactionId transactionId, Permissions permissions) {
+            int privateShare = 0, privateExclusive = 0, publicShare = 0, publicExclusive = 0;
+            if (SharedLock.containsKey(pageId))
+                for (TransactionId tid : SharedLock.get(pageId))
+                    if (tid.equals(transactionId))
+                        privateShare++;
+                    else
+                        publicShare++;
+            if (ExclusiveLock.containsKey(pageId))
+                for (TransactionId tid : ExclusiveLock.get(pageId))
+                    if (tid.equals(transactionId))
+                        privateExclusive++;
+                    else
+                        publicExclusive++;
+            if (permissions == Permissions.READ_ONLY){
+                if (privateShare == 1 && publicExclusive == 0)
+                    return true;
+                else if (privateShare == 0 && publicExclusive == 0) {
+                    addLock(pageId, transactionId, permissions);
+                    return true;
+                }
+                else if (publicExclusive == 1)
+                    return false;
+            }
+            else {
+                if (privateExclusive == 1)
+                    return true;
+                else if (privateExclusive == 0 && publicExclusive == 0 && publicShare == 0) {
+                    addLock(pageId, transactionId, permissions);
+                    return true;
+                }
+                else if (publicExclusive == 1 || publicShare >= 1)
+                    return false;
+            }
+            return false;
+        }
+
+        public synchronized void releaseLock(PageId pageId, TransactionId transactionId) {
+            if (SharedLock.containsKey(pageId)) {
+                SharedLock.get(pageId).remove(transactionId);
+                if (SharedLock.get(pageId).isEmpty())
+                    SharedLock.remove(pageId);
+            }
+            if (ExclusiveLock.containsKey(pageId)) {
+                ExclusiveLock.get(pageId).remove(transactionId);
+                if (ExclusiveLock.get(pageId).isEmpty())
+                    ExclusiveLock.remove(pageId);
+            }
+        }
+
+        public synchronized void releaseTransaction(TransactionId transactionId) {
+            for (Map.Entry<PageId, CopyOnWriteArrayList<TransactionId> > entry : SharedLock.entrySet())
+                if (entry.getValue().contains(transactionId))
+                    releaseLock(entry.getKey(), transactionId);
+            for (Map.Entry<PageId, CopyOnWriteArrayList<TransactionId> > entry : ExclusiveLock.entrySet())
+                if (entry.getValue().contains(transactionId))
+                    releaseLock(entry.getKey(), transactionId);
+        }
+    }
     /**
      * Retrieve the specified page with the associated permissions.
      * Will acquire a lock and may block if that lock is held by another
@@ -85,11 +201,28 @@ public class BufferPool {
      * @param pid the ID of the requested page
      * @param perm the requested permissions on the page
      */
+
+    private Locker locker = new Locker();
+
     public  Page getPage(TransactionId tid, PageId pid, Permissions perm)
             throws TransactionAbortedException, DbException {
         // some code goes here
+        boolean lock = locker.CheckLock(pid, tid, perm);
+        int num = 0;
+        while (!lock) {
+            num++;
+            if (num == 20 || locker.Conflict(pid, tid, perm))
+                throw new TransactionAbortedException();
+            try {
+                Thread.sleep(100);
+            }
+            catch (InterruptedException e) {
+                throw new TransactionAbortedException();
+            }
+            lock = locker.CheckLock(pid, tid, perm);
+        }
         try {
-            Page page;
+            /*Page page;
             if (pages.containsKey(pid)) {
                 return pages.get(pid);
             }
@@ -100,7 +233,28 @@ public class BufferPool {
                 page = Database.getCatalog().getDatabaseFile(pid.getTableId()).readPage(pid);
                 pages.put(pid, page);
                 return page;
+
+            }*/
+            if (pages.containsKey(pid)) {
+                return pages.get(pid);
             }
+            if (pages.size() >= Number) {
+                Iterator<PageId> iter = pages.keySet().iterator();
+                PageId curPage = iter.next();
+                while (pages.get(curPage).isDirty() != null) {
+                    if (!iter.hasNext())
+                        throw new DbException("no enough clean page");
+                    curPage = iter.next();
+                }
+                flushPage(curPage);
+                pages.remove(curPage);
+                Page page = Database.getCatalog().getDatabaseFile(pid.getTableId()).readPage(pid);
+                pages.put(pid, page);
+                return page;
+            }
+            Page page = Database.getCatalog().getDatabaseFile(pid.getTableId()).readPage(pid);
+            pages.put(pid, page);
+            return page;
         } catch (Exception e) {
             throw new DbException("Page Conflict");
         }
@@ -119,6 +273,7 @@ public class BufferPool {
     public  void releasePage(TransactionId tid, PageId pid) {
         // some code goes here
         // not necessary for lab1|lab2
+        locker.releaseLock(pid, tid);
     }
 
     /**
@@ -129,6 +284,7 @@ public class BufferPool {
     public void transactionComplete(TransactionId tid) throws IOException {
         // some code goes here
         // not necessary for lab1|lab2
+        transactionComplete(tid, true);
     }
 
     /** Return true if the specified transaction has a lock on the specified page */
@@ -149,6 +305,20 @@ public class BufferPool {
             throws IOException {
         // some code goes here
         // not necessary for lab1|lab2
+        locker.releaseTransaction(tid);
+        if (commit)
+            flushPages(tid);
+        else {
+            ArrayList<Page> olds = new ArrayList<>();
+            for (Page page: pages.values())
+                if (page.isDirty() != null && page.isDirty().equals(tid)) {
+                    Page old = Database.getCatalog().getDatabaseFile(page.getId().getTableId()).readPage(page.getId());
+                    old.markDirty(false, null);
+                    olds.add(old);
+                }
+            for (Page page: olds)
+                pages.put(page.getId(), page);
+        }
     }
 
     private void Tupletmp(TransactionId tid, ArrayList<Page> pageArrayList)
@@ -156,11 +326,31 @@ public class BufferPool {
         Page curPage;
         Iterator<Page> iter = pageArrayList.iterator();
         while (iter.hasNext()) {
-            if (pages.size() >= Number)
-                evictPage();
             curPage = iter.next();
-            pages.put(curPage.getId(), curPage);
             curPage.markDirty(true, tid);
+            if (pages.containsKey(curPage.getId())) {
+                pages.put(curPage.getId(), curPage);
+                continue;
+            }
+            if (pages.size() >= Number) {
+                Iterator<PageId> it = this.pages.keySet().iterator();
+                PageId pageId = it.next();
+                boolean mark = false;
+                while (this.pages.get(pageId).isDirty() != null) {
+                    if (!it.hasNext()) {
+                        mark = true;
+                        break;
+                    }
+                    pageId = it.next();
+                }
+                if (mark) {
+                    flushPage(curPage.getId());
+                    continue;
+                }
+                flushPage(pageId);
+                this.pages.remove(pageId);
+            }
+            this.pages.put(curPage.getId(), curPage);
         }
         /*for (Page p : pageArrayList) {
             PageId pageId = p.getId();
@@ -230,8 +420,13 @@ public class BufferPool {
     public synchronized void flushAllPages() throws IOException {
         // some code goes here
         // not necessary for lab1
-        for (PageId pageId: pages.keySet())
-            flushPage(pageId);
+        for (PageId pageId: pages.keySet()) {
+            Page page = pages.get(pageId);
+            if (page.isDirty() != null) {
+                page.markDirty(false, null);
+                Database.getCatalog().getDatabaseFile(pageId.getTableId()).writePage(page);
+            }
+        }
     }
 
     /** Remove the specific page id from the buffer pool.
@@ -255,7 +450,6 @@ public class BufferPool {
         // some code goes here
         // not necessary for lab1
         Page page = pages.get(pid);
-
         if (page == null || page.isDirty() == null)
             return;
         DbFile f = Database.getCatalog().getDatabaseFile(pid.getTableId());
@@ -268,7 +462,11 @@ public class BufferPool {
     public synchronized  void flushPages(TransactionId tid) throws IOException {
         // some code goes here
         // not necessary for lab1|lab2
-
+        if (pages.isEmpty())
+            return;
+        for (Page page: pages.values())
+            if (page.isDirty() != null && page.isDirty().equals(tid))
+                flushPage(page.getId());
     }
 
     /**
